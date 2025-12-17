@@ -6,7 +6,6 @@ from PySide6.QtGui import QDrag, QAction
 
 MIME = "application/x-excel-filler-cell"
 
-
 def _is_missing_local(v: str | None) -> bool:
     if v is None:
         return True
@@ -15,12 +14,8 @@ def _is_missing_local(v: str | None) -> bool:
         return True
     return s.lower() in {"nan", "none", "null", "-", "n/a"}
 
-
 class SourceTable(QTableWidget):
-    """Rechts: Drag-Quelle (auch Multi-Selection)"""
-
     def startDrag(self, supportedActions):
-        # Sammle selektierte Zellen (in Visual-Reihenfolge: row, col)
         items = self.selectedItems()
         if not items:
             item = self.currentItem()
@@ -28,10 +23,9 @@ class SourceTable(QTableWidget):
                 return
             items = [item]
 
-        # Sortieren nach row/col für deterministisches Zusammenfügen
         cells = sorted([(it.row(), it.column(), it.text()) for it in items], key=lambda x: (x[0], x[1]))
         parts = [t for _, _, t in cells if not _is_missing_local(t)]
-        text = "\n".join(parts)  # default: Zeilenweise
+        text = "\n".join(parts)  # Multi-Zellen standardmäßig zeilenweise
 
         mime = QMimeData()
         mime.setData(MIME, text.encode("utf-8"))
@@ -40,10 +34,7 @@ class SourceTable(QTableWidget):
         drag.setMimeData(mime)
         drag.exec(Qt.CopyAction)
 
-
 class TargetTable(QTableWidget):
-    """Links: Drop-Ziel (Replace/Append Menü)"""
-
     def dragEnterEvent(self, e):
         if e.mimeData().hasFormat(MIME):
             e.acceptProposedAction()
@@ -61,7 +52,6 @@ class TargetTable(QTableWidget):
             return super().dropEvent(e)
 
         text = bytes(e.mimeData().data(MIME)).decode("utf-8")
-
         idx = self.indexAt(e.position().toPoint())
         if not idx.isValid():
             e.ignore()
@@ -73,7 +63,6 @@ class TargetTable(QTableWidget):
         existing_text = existing_item.text() if existing_item else ""
         existing_is_missing = _is_missing_local(existing_text)
 
-        # Wenn Ziel belegt -> Menü
         if not existing_is_missing:
             menu = QMenu(self)
 
@@ -118,7 +107,6 @@ class TargetTable(QTableWidget):
         else:
             new_text = text
 
-        # Schreiben
         self.blockSignals(True)
         item = self.item(row, col)
         if item is None:
@@ -132,6 +120,6 @@ class TargetTable(QTableWidget):
 
         mw = self.window()
         if hasattr(mw, "on_t1_cell_dropped"):
-            mw.on_t1_cell_dropped(row, col, new_text)
+            mw.on_t1_cell_dropped(self, row, col, new_text)
 
         e.acceptProposedAction()

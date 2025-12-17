@@ -1,22 +1,9 @@
 from __future__ import annotations
-from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-
-
-@dataclass
-class Change:
-    key: str
-    row_index: int
-    col: str
-    old: str
-    new: str
-    source: str
-    score: int
-
 
 def save_filled(df: pd.DataFrame, out_dir: str | Path, base_name: str) -> Path:
     ts = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -26,13 +13,13 @@ def save_filled(df: pd.DataFrame, out_dir: str | Path, base_name: str) -> Path:
     df2.to_excel(out, index=False)
     return out
 
+def save_to_path(df: pd.DataFrame, path: str | Path) -> Path:
+    path = Path(path)
+    df2 = df.drop(columns=[c for c in ["_KEY_"] if c in df.columns])
+    df2.to_excel(path, index=False)
+    return path
 
 def save_in_place(df: pd.DataFrame, path: str | Path, sheet_name: str, make_backup: bool = True) -> Path:
-    """
-    Schreibt Tabelle 1 zurück in DIESELBE Excel-Datei (gleiches Sheet).
-    Andere Sheets bleiben erhalten.
-    Optional: legt vorher ein Backup an.
-    """
     path = Path(path)
 
     if make_backup and path.exists():
@@ -49,7 +36,6 @@ def save_in_place(df: pd.DataFrame, path: str | Path, sheet_name: str, make_back
     ws = wb.create_sheet(sheet_name, 0)
 
     df2 = df.drop(columns=[c for c in ["_KEY_"] if c in df.columns])
-
     for r in dataframe_to_rows(df2, index=False, header=True):
         ws.append(r)
 

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QInputDialog, QDialog, QFormLayout, QCheckBox, QDockWidget, QMenu
 )
 from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QColor, QBrush
+from PySide6.QtGui import QColor, QBrush, QAction
 
 from app.services.excel_io import list_sheets, load_table
 from app.services.matcher import MatchEngine
@@ -45,26 +45,32 @@ class MainWindow(QMainWindow):
 
         self.t1 = None
         self.t2 = None
-        self._t1_sheet_slot = None
-        self._t2_sheet_slot = None
         self.engine: MatchEngine | None = None
 
         self.keys_queue: list[str] = []
         self.current_pos = -1
         self.current_key: str | None = None
 
-        # Persistent settings
+        self._t1_sheet_slot = None
+        self._t2_sheet_slot = None
+
+        # Settings
         self.settings: AppSettings = load_settings()
         self.col_links = dict(self.settings.col_links)
         self.cuts = dict(self.settings.cuts)
         self.country_default_value = self.settings.country_default_value
 
-        # ---- Central widget ----
+        # For 2-line split
+        self._t1_cols_top: list[str] = []
+        self._t1_cols_bottom: list[str] = []
+        self._t2_cols_top: list[str] = []
+        self._t2_cols_bottom: list[str] = []
+
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # ===================== Tabelle 1 =====================
+        # --------- File selectors ----------
         row1 = QHBoxLayout()
         self.btn_t1 = QPushButton("Datei 1 wählen")
         self.lbl_t1 = QLabel("—")
@@ -84,7 +90,6 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.cb_t1_key)
         layout.addLayout(row1)
 
-        # ===================== Tabelle 2 =====================
         row2 = QHBoxLayout()
         self.btn_t2 = QPushButton("Datei 2 wählen")
         self.lbl_t2 = QLabel("—")
@@ -104,11 +109,10 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.cb_t2_key)
         layout.addLayout(row2)
 
-        # ===================== Start =====================
         self.btn_start = QPushButton("Start (fehlende Kundennummern)")
         layout.addWidget(self.btn_start)
 
-        # ===================== Navigation =====================
+        # --------- Navigation / actions ----------
         nav = QHBoxLayout()
         self.btn_add_col = QPushButton("Spalte hinzufügen (T1)")
         self.btn_links = QPushButton("Kopplungen")
@@ -117,8 +121,9 @@ class MainWindow(QMainWindow):
         self.btn_fill_all = QPushButton("Plausibel füllen (Gesamt)")
         self.btn_prev = QPushButton("◀ Zurück")
         self.btn_next = QPushButton("Nächste ▶")
-        self.btn_save = QPushButton("Speichern")
+        self.btn_save_as = QPushButton("Speichern unter…")
         self.btn_save_inplace = QPushButton("Speichern (gleiche Datei)")
+        self.btn_save = QPushButton("Speichern (neu)")
 
         nav.addWidget(self.btn_add_col)
         nav.addWidget(self.btn_links)
@@ -127,61 +132,77 @@ class MainWindow(QMainWindow):
         nav.addWidget(self.btn_fill_all)
         nav.addWidget(self.btn_prev)
         nav.addWidget(self.btn_next)
-        nav.addWidget(self.btn_save)
+        nav.addWidget(self.btn_save_as)
         nav.addWidget(self.btn_save_inplace)
+        nav.addWidget(self.btn_save)
         layout.addLayout(nav)
 
-        # ===================== T1 (Ziel) =====================
-        self.t1_view = TargetTable(1, 0)
-        self.t1_view.setEditTriggers(
-            QAbstractItemView.DoubleClicked
-            | QAbstractItemView.SelectedClicked
-            | QAbstractItemView.EditKeyPressed
-        )
-        self.t1_view.setDragDropMode(QAbstractItemView.DropOnly)
-        layout.addWidget(self.t1_view)
+        # --------- T1 container: two rows ----------
+        self.t1_container = QWidget()
+        t1_layout = QVBoxLayout(self.t1_container)
+        t1_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.t1_view.horizontalHeader().setSectionsMovable(True)
-        self.t1_view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
-        self.t1_view.horizontalHeader().customContextMenuRequested.connect(
-            lambda pos: self._header_menu(self.t1_view, "t1", pos)
-        )
-        self.t1_view.horizontalHeader().sectionMoved.connect(lambda *_: self._persist_order_from_view("t1"))
+        self.t1_view_top = TargetTable(1, 0)
+        self.t1_view_bottom = TargetTable(1, 0)
 
-        # ===================== Status =====================
+        for v in (self.t1_view_top, self.t1_view_bottom):
+            v.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
+            v.setDragDropMode(QAbstractItemView.DropOnly)
+            v.horizontalHeader().setSectionsMovable(True)
+            v.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+            v.horizontalHeader().customContextMenuRequested.connect(lambda pos, view=v: self._header_menu(view, "t1", pos))
+            v.horizontalHeader().sectionMoved.connect(lambda *_: self._persist_order_from_views("t1"))
+            v.itemChanged.connect(self.on_t1_item_changed_any)
+
+        t1_layout.addWidget(self.t1_view_top)
+        t1_layout.addWidget(self.t1_view_bottom)
+        layout.addWidget(self.t1_container)
+
+        # --------- Status ----------
         self.status = QLabel(f"Settings geladen (Country default: {self.country_default_value})")
         layout.addWidget(self.status)
 
-        # ===================== T2 (Quelle) Dock =====================
-        self.t2_view = SourceTable(0, 0)
-        self.t2_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.t2_view.setDragEnabled(True)
-        self.t2_view.setDragDropMode(QAbstractItemView.DragOnly)
-        self.t2_view.cellDoubleClicked.connect(self.quick_copy_t2_to_focused_t1)
+        # --------- T2 dock: two rows ----------
+        self.t2_container = QWidget()
+        t2_layout = QVBoxLayout(self.t2_container)
+        t2_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.t2_view.horizontalHeader().setSectionsMovable(True)
-        self.t2_view.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
-        self.t2_view.horizontalHeader().customContextMenuRequested.connect(
-            lambda pos: self._header_menu(self.t2_view, "t2", pos)
-        )
-        self.t2_view.horizontalHeader().sectionMoved.connect(lambda *_: self._persist_order_from_view("t2"))
+        self.t2_view_top = SourceTable(0, 0)
+        self.t2_view_bottom = SourceTable(0, 0)
+
+        for v in (self.t2_view_top, self.t2_view_bottom):
+            v.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            v.setDragEnabled(True)
+            v.setDragDropMode(QAbstractItemView.DragOnly)
+            v.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            v.setSelectionBehavior(QAbstractItemView.SelectItems)
+            v.horizontalHeader().setSectionsMovable(True)
+            v.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+            v.horizontalHeader().customContextMenuRequested.connect(lambda pos, view=v: self._header_menu(view, "t2", pos))
+            v.horizontalHeader().sectionMoved.connect(lambda *_: self._persist_order_from_views("t2"))
+            v.cellDoubleClicked.connect(lambda r, c, view=v: self.quick_copy_from_t2(view, r, c))
+
+        t2_layout.addWidget(self.t2_view_top)
+        t2_layout.addWidget(self.t2_view_bottom)
 
         self.dock_t2 = QDockWidget("Tabelle 2 (Quelle)", self)
-        self.dock_t2.setWidget(self.t2_view)
+        self.dock_t2.setWidget(self.t2_container)
         self.dock_t2.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
         self.dock_t2.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_t2)
-
         self.setDockOptions(QMainWindow.AllowTabbedDocks | QMainWindow.AllowNestedDocks)
 
-        # ===================== Events =====================
+        # --------- Events ----------
         self.btn_t1.clicked.connect(self.pick_t1)
         self.btn_t2.clicked.connect(self.pick_t2)
         self.btn_start.clicked.connect(self.start_scan)
 
         self.btn_prev.clicked.connect(self.prev_key)
         self.btn_next.clicked.connect(self.next_key)
-        self.btn_save.clicked.connect(self.save_file)
+
+        self.btn_save.clicked.connect(self.save_new_file)
+        self.btn_save_as.clicked.connect(self.save_as)
+        self.btn_save_inplace.clicked.connect(self.save_inplace)
 
         self.btn_add_col.clicked.connect(self.add_column_t1_global)
         self.btn_links.clicked.connect(self.open_links_dialog)
@@ -189,15 +210,12 @@ class MainWindow(QMainWindow):
         self.btn_fill_row.clicked.connect(self.autofill_current_key_linked)
         self.btn_fill_all.clicked.connect(self.autofill_all_linked)
 
-        self.t1_view.itemChanged.connect(self.on_t1_item_changed)
-
     # ---------------- Settings persistence ----------------
     def _save_settings_now(self):
         self.settings = AppSettings(
             col_links=dict(self.col_links),
             cuts=dict(self.cuts),
             country_default_value=str(self.country_default_value),
-
             t1_hidden=list(self.settings.t1_hidden),
             t2_hidden=list(self.settings.t2_hidden),
             t1_colors=dict(self.settings.t1_colors),
@@ -214,9 +232,7 @@ class MainWindow(QMainWindow):
             pass
         super().closeEvent(event)
 
-    # ==========================================================
-    # Header context menu
-    # ==========================================================
+    # ---------------- Header menu / prefs ----------------
     def _header_menu(self, table, table_key: str, pos: QPoint):
         header = table.horizontalHeader()
         logical_index = header.logicalIndexAt(pos)
@@ -229,8 +245,8 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        act_hide = menu.addAction(f"Spalte ausblenden: {col_name}")
-        act_hide.triggered.connect(lambda: self._hide_column(table_key, col_name))
+        a_hide = menu.addAction(f"Spalte ausblenden: {col_name}")
+        a_hide.triggered.connect(lambda: self._hide_column(table_key, col_name))
 
         hidden = self.settings.t1_hidden if table_key == "t1" else self.settings.t2_hidden
         if hidden:
@@ -246,16 +262,16 @@ class MainWindow(QMainWindow):
             a = subc.addAction(hexcol)
             a.triggered.connect(lambda _, hc=hexcol: self._set_col_color(table_key, col_name, hc))
 
-        act_clear = menu.addAction("Farbe löschen")
-        act_clear.triggered.connect(lambda: self._clear_col_color(table_key, col_name))
+        a_clear = menu.addAction("Farbe löschen")
+        a_clear.triggered.connect(lambda: self._clear_col_color(table_key, col_name))
 
         menu.addSeparator()
 
-        act_show_all = menu.addAction("Alle Spalten einblenden")
-        act_show_all.triggered.connect(lambda: self._show_all(table_key))
+        a_show_all = menu.addAction("Alle Spalten einblenden")
+        a_show_all.triggered.connect(lambda: self._show_all(table_key))
 
-        act_reset_order = menu.addAction("Spaltenreihenfolge zurücksetzen")
-        act_reset_order.triggered.connect(lambda: self._reset_order(table_key))
+        a_reset_order = menu.addAction("Spaltenreihenfolge zurücksetzen")
+        a_reset_order.triggered.connect(lambda: self._reset_order(table_key))
 
         menu.exec(header.mapToGlobal(pos))
 
@@ -294,19 +310,13 @@ class MainWindow(QMainWindow):
         self._apply_table_prefs(table_key)
         self._save_settings_now()
 
-    def _persist_order_from_view(self, table_key: str):
-        table = self.t1_view if table_key == "t1" else self.t2_view
-        header = table.horizontalHeader()
-        names = []
-        for visual in range(header.count()):
-            logical = header.logicalIndex(visual)
-            item = table.horizontalHeaderItem(logical)
-            if item:
-                names.append(item.text())
+    def _persist_order_from_views(self, table_key: str):
         if table_key == "t1":
-            self.settings.t1_order = names
+            order = self._get_visual_order(self.t1_view_top) + self._get_visual_order(self.t1_view_bottom)
+            self.settings.t1_order = [c for c in order if c]
         else:
-            self.settings.t2_order = names
+            order = self._get_visual_order(self.t2_view_top) + self._get_visual_order(self.t2_view_bottom)
+            self.settings.t2_order = [c for c in order if c]
         self._save_settings_now()
 
     def _reset_order(self, table_key: str):
@@ -317,47 +327,55 @@ class MainWindow(QMainWindow):
         self._apply_table_prefs(table_key)
         self._save_settings_now()
 
+    def _get_visual_order(self, table) -> list[str]:
+        header = table.horizontalHeader()
+        names = []
+        for visual in range(header.count()):
+            logical = header.logicalIndex(visual)
+            it = table.horizontalHeaderItem(logical)
+            if it:
+                names.append(it.text())
+        return names
+
     def _apply_table_prefs(self, table_key: str):
-        table = self.t1_view if table_key == "t1" else self.t2_view
-        hidden = self.settings.t1_hidden if table_key == "t1" else self.settings.t2_hidden
-        colors = self.settings.t1_colors if table_key == "t1" else self.settings.t2_colors
-        order = self.settings.t1_order if table_key == "t1" else self.settings.t2_order
+        if table_key == "t1":
+            views = (self.t1_view_top, self.t1_view_bottom)
+            hidden = self.settings.t1_hidden
+            colors = self.settings.t1_colors
+            order = self.settings.t1_order
+        else:
+            views = (self.t2_view_top, self.t2_view_bottom)
+            hidden = self.settings.t2_hidden
+            colors = self.settings.t2_colors
+            order = self.settings.t2_order
 
-        # Hide/show
-        for i in range(table.columnCount()):
-            item = table.horizontalHeaderItem(i)
-            if not item:
-                continue
-            name = item.text()
-            table.setColumnHidden(i, name in hidden)
+        # Hide/show + colors
+        for table in views:
+            for i in range(table.columnCount()):
+                it = table.horizontalHeaderItem(i)
+                if not it:
+                    continue
+                name = it.text()
+                table.setColumnHidden(i, name in hidden)
+                if name in colors:
+                    bg = QColor(colors[name])
+                    fg = _pick_text_color_for_bg(colors[name])
+                    it.setBackground(QBrush(bg))
+                    it.setForeground(QBrush(fg))
+                else:
+                    it.setBackground(QBrush())
+                    it.setForeground(QBrush())
 
-        # Colors (QTableWidgetItem background/foreground)
-        for i in range(table.columnCount()):
-            item = table.horizontalHeaderItem(i)
-            if not item:
-                continue
-            name = item.text()
-            if name in colors:
-                bg = QColor(colors[name])
-                fg = _pick_text_color_for_bg(colors[name])
-                item.setBackground(QBrush(bg))
-                item.setForeground(QBrush(fg))
-            else:
-                item.setBackground(QBrush())
-                item.setForeground(QBrush())
-
-        # Order (visual)
+        # Order (best-effort, only within each view)
         if order:
-            header = table.horizontalHeader()
-            existing = []
-            for v in range(header.count()):
-                logical = header.logicalIndex(v)
-                it = table.horizontalHeaderItem(logical)
-                if it:
-                    existing.append(it.text())
-
-            if set(order) == set(existing):
-                for target_visual, name in enumerate(order):
+            for table in views:
+                header = table.horizontalHeader()
+                existing = self._get_visual_order(table)
+                if not existing:
+                    continue
+                # subset order
+                desired = [c for c in order if c in existing]
+                for target_visual, name in enumerate(desired):
                     for v in range(header.count()):
                         logical = header.logicalIndex(v)
                         it = table.horizontalHeaderItem(logical)
@@ -365,9 +383,7 @@ class MainWindow(QMainWindow):
                             header.moveSection(v, target_visual)
                             break
 
-    # ==========================================================
-    # LOAD
-    # ==========================================================
+    # ---------------- Load files ----------------
     def pick_t1(self):
         path, _ = QFileDialog.getOpenFileName(self, "Excel Datei 1", "", "Excel (*.xlsx)")
         if not path:
@@ -375,14 +391,15 @@ class MainWindow(QMainWindow):
         self.lbl_t1.setText(path)
         self.cb_t1_sheet.clear()
         self.cb_t1_sheet.addItems(list_sheets(path))
+
         if self._t1_sheet_slot is not None:
             try:
                 self.cb_t1_sheet.currentTextChanged.disconnect(self._t1_sheet_slot)
             except Exception:
                 pass
-
         self._t1_sheet_slot = lambda _=None, p=path: self.load_t1(p)
         self.cb_t1_sheet.currentTextChanged.connect(self._t1_sheet_slot)
+
         self.load_t1(path)
 
     def load_t1(self, path: str):
@@ -397,14 +414,15 @@ class MainWindow(QMainWindow):
         self.lbl_t2.setText(path)
         self.cb_t2_sheet.clear()
         self.cb_t2_sheet.addItems(list_sheets(path))
+
         if self._t2_sheet_slot is not None:
             try:
                 self.cb_t2_sheet.currentTextChanged.disconnect(self._t2_sheet_slot)
             except Exception:
                 pass
-
         self._t2_sheet_slot = lambda _=None, p=path: self.load_t2(p)
         self.cb_t2_sheet.currentTextChanged.connect(self._t2_sheet_slot)
+
         self.load_t2(path)
 
     def load_t2(self, path: str):
@@ -412,9 +430,7 @@ class MainWindow(QMainWindow):
         self.cb_t2_key.clear()
         self.cb_t2_key.addItems(self.t2.df.columns.tolist())
 
-    # ==========================================================
-    # SCAN
-    # ==========================================================
+    # ---------------- Scan ----------------
     def start_scan(self):
         if not self.t1 or not self.t2:
             QMessageBox.warning(self, "Fehlt", "Bitte beide Tabellen laden.")
@@ -432,9 +448,7 @@ class MainWindow(QMainWindow):
         self.status.setText(f"{len(self.keys_queue)} Kundennummern mit Lücken gefunden")
         self.next_key()
 
-    # ==========================================================
-    # NAVIGATION
-    # ==========================================================
+    # ---------------- Navigation ----------------
     def next_key(self):
         if not self.keys_queue:
             QMessageBox.information(self, "Fertig", "Keine fehlenden Felder gefunden.")
@@ -450,97 +464,140 @@ class MainWindow(QMainWindow):
             self.current_pos -= 1
             self.show_key(self.keys_queue[self.current_pos])
 
-    # ==========================================================
-    # DISPLAY
-    # ==========================================================
+    # ---------------- Show key with 2-line split ----------------
     def show_key(self, key: str):
         self.current_key = key
         idx = self.engine.t1_row_index_for_key(key)
 
-        # ---- T1
-        cols = [c for c in self.engine.df1.columns if c != "_KEY_"]
-        self.t1_view.blockSignals(True)
-        self.t1_view.setColumnCount(len(cols))
-        self.t1_view.setHorizontalHeaderLabels(cols)
-        self.t1_view.setRowCount(1)
+        all_t1_cols = [c for c in self.engine.df1.columns if c != "_KEY_"]
+        self._t1_cols_top = all_t1_cols[:20]
+        self._t1_cols_bottom = all_t1_cols[20:]
 
         row = self.engine.df1.loc[idx]
-        for i, col in enumerate(cols):
-            self.t1_view.setItem(0, i, QTableWidgetItem("" if row[col] is None else str(row[col])))
-        self.t1_view.blockSignals(False)
 
-        # ---- T2
+        def render_t1(view, cols):
+            view.blockSignals(True)
+            view.setColumnCount(len(cols))
+            view.setHorizontalHeaderLabels(cols)
+            view.setRowCount(1)
+            for i, col in enumerate(cols):
+                view.setItem(0, i, QTableWidgetItem("" if row.get(col) is None else str(row.get(col))))
+            view.blockSignals(False)
+
+        render_t1(self.t1_view_top, self._t1_cols_top)
+        if len(all_t1_cols) > 20:
+            self.t1_view_bottom.show()
+            render_t1(self.t1_view_bottom, self._t1_cols_bottom)
+        else:
+            self.t1_view_bottom.hide()
+
         df2 = self.engine.t2_rows_for_key(key)
-        cols2 = [c for c in df2.columns if c != "_KEY_"]
-        self.t2_view.setColumnCount(len(cols2))
-        self.t2_view.setHorizontalHeaderLabels(cols2)
-        self.t2_view.setRowCount(len(df2))
+        all_t2_cols = [c for c in df2.columns if c != "_KEY_"]
+        self._t2_cols_top = all_t2_cols[:20]
+        self._t2_cols_bottom = all_t2_cols[20:]
 
-        for r in range(len(df2)):
-            for c, col in enumerate(cols2):
-                self.t2_view.setItem(r, c, QTableWidgetItem("" if df2.iloc[r][col] is None else str(df2.iloc[r][col])))
+        def render_t2(view, cols):
+            view.setColumnCount(len(cols))
+            view.setHorizontalHeaderLabels(cols)
+            view.setRowCount(len(df2))
+            for r in range(len(df2)):
+                for c, col in enumerate(cols):
+                    view.setItem(r, c, QTableWidgetItem("" if df2.iloc[r].get(col) is None else str(df2.iloc[r].get(col))))
+
+        render_t2(self.t2_view_top, self._t2_cols_top)
+        if len(all_t2_cols) > 20:
+            self.t2_view_bottom.show()
+            render_t2(self.t2_view_bottom, self._t2_cols_bottom)
+        else:
+            self.t2_view_bottom.hide()
 
         self.status.setText(f"KEY {key} ({self.current_pos+1}/{len(self.keys_queue)})")
 
-        # apply prefs after header items exist
         self._apply_table_prefs("t1")
         self._apply_table_prefs("t2")
 
-        self.t1_view.setCurrentCell(0, 0)
+        self.t1_view_top.setCurrentCell(0, 0)
 
-    # ==========================================================
-    # SYNC / QUICK COPY
-    # ==========================================================
-    def on_t1_item_changed(self, item: QTableWidgetItem):
+    # ---------------- Sync edits / drops ----------------
+    def on_t1_item_changed_any(self, item: QTableWidgetItem):
         if not self.engine or self.current_key is None:
             return
-        idx = self.engine.t1_row_index_for_key(self.current_key)
-        col = self.t1_view.horizontalHeaderItem(item.column()).text()
-        self.engine.df1.at[idx, col] = item.text()
+        t1_idx = self.engine.t1_row_index_for_key(self.current_key)
+        if t1_idx is None:
+            return
 
-    def on_t1_cell_dropped(self, row: int, col: int, text: str):
+        view = item.tableWidget()
+        if view == self.t1_view_top:
+            col_name = self._t1_cols_top[item.column()]
+        else:
+            col_name = self._t1_cols_bottom[item.column()]
+
+        self.engine.df1.at[t1_idx, col_name] = item.text()
+
+    def on_t1_cell_dropped(self, view, row: int, col: int, text: str):
         if not self.engine or self.current_key is None:
             return
-        idx = self.engine.t1_row_index_for_key(self.current_key)
-        col_name = self.t1_view.horizontalHeaderItem(col).text()
-        self.engine.df1.at[idx, col_name] = text
+        t1_idx = self.engine.t1_row_index_for_key(self.current_key)
+        if t1_idx is None:
+            return
 
-    def quick_copy_t2_to_focused_t1(self, r: int, c: int):
-        item = self.t2_view.item(r, c)
+        if view == self.t1_view_top:
+            col_name = self._t1_cols_top[col]
+        else:
+            col_name = self._t1_cols_bottom[col]
+
+        self.engine.df1.at[t1_idx, col_name] = text
+
+    def quick_copy_from_t2(self, t2_view, r: int, c: int):
+        item = t2_view.item(r, c)
         if not item:
             return
         text = item.text()
 
-        col = self.t1_view.currentColumn()
-        if col < 0:
-            col = 0
-        self.t1_view.blockSignals(True)
-        self.t1_view.setItem(0, col, QTableWidgetItem(text))
-        self.t1_view.blockSignals(False)
-        self.on_t1_cell_dropped(0, col, text)
+        target_view = self.t1_view_top
+        target_col = target_view.currentColumn()
+        if target_col < 0:
+            target_col = 0
 
-    # ==========================================================
-    # (Rest: Copplings/Cuts/Fill/AddCol/Save) – keep as-is in your current file
-    # ==========================================================
+        target_view.blockSignals(True)
+        target_view.setItem(0, target_col, QTableWidgetItem(text))
+        target_view.blockSignals(False)
+        self.on_t1_cell_dropped(target_view, 0, target_col, text)
 
-    def save_file(self):
+    # ---------------- Save buttons ----------------
+    def save_new_file(self):
         if not self.engine or not self.t1:
             return
         from app.services.apply_changes import save_filled
         out = save_filled(self.engine.df1, self.t1.path.parent, self.t1.path.stem)
         QMessageBox.information(self, "Gespeichert", str(out))
 
+    def save_as(self):
+        if not self.engine:
+            return
+        from app.services.apply_changes import save_to_path
+        default = "output.xlsx"
+        if self.t1:
+            default = str(self.t1.path.with_name(self.t1.path.stem + "_filled.xlsx"))
+        path, _ = QFileDialog.getSaveFileName(self, "Speichern unter…", default, "Excel (*.xlsx)")
+        if not path:
+            return
+        out = save_to_path(self.engine.df1, path)
+        QMessageBox.information(self, "Gespeichert", str(out))
+
     def save_inplace(self):
         if not self.engine or not self.t1:
             return
         from app.services.apply_changes import save_in_place
-        out = save_in_place(self.engine.df1, self.t1.path, self.t1.sheet, make_backup=True)
-        QMessageBox.information(self, "Gespeichert", f"In Datei gespeichert (Backup erstellt):\n{out}")
+        try:
+            out = save_in_place(self.engine.df1, self.t1.path, self.t1.sheet, make_backup=True)
+            QMessageBox.information(self, "Gespeichert", f"In Datei gespeichert (Backup erstellt):\n{out}")
+        except PermissionError:
+            QMessageBox.critical(self, "Fehler", "Datei ist vermutlich in Excel geöffnet. Bitte schließen und erneut speichern.")
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen:\n{e}")
 
-    # ---- Placeholder methods (keep your existing implementations) ----
-    # ==========================================================
-    # KOPPLUNGEN
-    # ==========================================================
+    # ---------------- Copplings ----------------
     def open_links_dialog(self):
         if not self.engine:
             QMessageBox.warning(self, "Fehlt", "Bitte erst Start ausführen.")
@@ -565,15 +622,16 @@ class MainWindow(QMainWindow):
             combos[t1] = cb
             form.addRow(t1, cb)
 
+        row = QHBoxLayout()
         btn_ok = QPushButton("Speichern")
         btn_cancel = QPushButton("Abbrechen")
-        row = QHBoxLayout()
         row.addWidget(btn_ok)
         row.addWidget(btn_cancel)
         layout.addLayout(row)
 
         def on_ok():
             self.col_links = {t1: combos[t1].currentText().strip() for t1 in t1_cols if combos[t1].currentText().strip()}
+            self.settings.col_links = dict(self.col_links)
             self._save_settings_now()
             dlg.accept()
 
@@ -581,9 +639,7 @@ class MainWindow(QMainWindow):
         btn_cancel.clicked.connect(dlg.reject)
         dlg.exec()
 
-    # ==========================================================
-    # CUTS
-    # ==========================================================
+    # ---------------- Cuts ----------------
     def open_cuts_dialog(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("Cuts (Transformationen)")
@@ -592,7 +648,7 @@ class MainWindow(QMainWindow):
         cb_split = QCheckBox("Adresse splitten: Straße/Hausnummer trennen")
         cb_phone = QCheckBox("Telefon normalisieren: nur Ziffern (optional +)")
         cb_country = QCheckBox("Country default setzen, wenn leer")
-        cb_state = QCheckBox("Bundesland aus PLZ ermitteln (benötigt pgeocode)")
+        cb_state = QCheckBox("Bundesland aus PLZ ermitteln")
 
         cb_split.setChecked(self.cuts.get("split_street_house", True))
         cb_phone.setChecked(self.cuts.get("normalize_phone", True))
@@ -604,7 +660,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(cb_country)
         layout.addWidget(cb_state)
 
-        btn_country = QPushButton(f"Country-Default setzen (aktuell: {self.country_default_value})")
+        btn_country = QPushButton(f"Country-Default (aktuell: {self.country_default_value})")
         layout.addWidget(btn_country)
 
         btn_ok = QPushButton("Speichern")
@@ -614,13 +670,15 @@ class MainWindow(QMainWindow):
             v, ok = QInputDialog.getText(self, "Country Default", "Wert für Country (z.B. Deutschland oder DE):")
             if ok and (v or "").strip():
                 self.country_default_value = v.strip()
-                btn_country.setText(f"Country-Default setzen (aktuell: {self.country_default_value})")
+                btn_country.setText(f"Country-Default (aktuell: {self.country_default_value})")
 
         def on_ok():
             self.cuts["split_street_house"] = cb_split.isChecked()
             self.cuts["normalize_phone"] = cb_phone.isChecked()
             self.cuts["fill_country_default"] = cb_country.isChecked()
             self.cuts["infer_state_from_zip"] = cb_state.isChecked()
+            self.settings.cuts = dict(self.cuts)
+            self.settings.country_default_value = self.country_default_value
             self._save_settings_now()
             dlg.accept()
 
@@ -628,9 +686,7 @@ class MainWindow(QMainWindow):
         btn_ok.clicked.connect(on_ok)
         dlg.exec()
 
-    # ==========================================================
-    # PLAUSIBEL FÜLLEN - ZEILE
-    # ==========================================================
+    # ---------------- Plausible fill row ----------------
     def autofill_current_key_linked(self):
         if not self.engine or self.current_key is None:
             return
@@ -648,9 +704,8 @@ class MainWindow(QMainWindow):
         key_col = self.cb_t1_key.currentText()
 
         filled = 0
-        self.t1_view.blockSignals(True)
 
-        for ui_col_index, t1_col in enumerate(display_cols):
+        for t1_col in display_cols:
             if t1_col == key_col:
                 continue
             if not is_missing(self.engine.df1.at[t1_idx, t1_col]):
@@ -670,7 +725,6 @@ class MainWindow(QMainWindow):
             if not chosen:
                 continue
 
-            # Cuts
             if self.cuts.get("split_street_house", True) and t1_col.lower() in ("street", "straße"):
                 street, house = split_street_house(chosen)
                 chosen = street
@@ -682,12 +736,8 @@ class MainWindow(QMainWindow):
                 chosen = normalize_phone(chosen)
 
             self.engine.df1.at[t1_idx, t1_col] = chosen
-            self.t1_view.setItem(0, ui_col_index, QTableWidgetItem(chosen))
             filled += 1
 
-        self.t1_view.blockSignals(False)
-
-        # Country / State optional
         if self.cuts.get("fill_country_default", False) and "country" in self.engine.df1.columns and is_missing(self.engine.df1.at[t1_idx, "country"]):
             self.engine.df1.at[t1_idx, "country"] = self.country_default_value
 
@@ -704,9 +754,7 @@ class MainWindow(QMainWindow):
         self.show_key(self.current_key)
         QMessageBox.information(self, "Auto-Fill", f"{filled} Felder (Zeile) plausibel gefüllt.")
 
-    # ==========================================================
-    # PLAUSIBEL FÜLLEN - GESAMT
-    # ==========================================================
+    # ---------------- Plausible fill all ----------------
     def autofill_all_linked(self):
         if not self.engine:
             QMessageBox.warning(self, "Fehlt", "Bitte erst Start ausführen.")
@@ -730,9 +778,7 @@ class MainWindow(QMainWindow):
             for t1_col, t2_col in self.col_links.items():
                 if t1_col in ("_KEY_", key_col):
                     continue
-                if t1_col not in self.engine.df1.columns:
-                    continue
-                if t2_col not in t2_df.columns:
+                if t1_col not in self.engine.df1.columns or t2_col not in t2_df.columns:
                     continue
                 if not is_missing(self.engine.df1.at[idx, t1_col]):
                     continue
@@ -778,9 +824,7 @@ class MainWindow(QMainWindow):
 
         QMessageBox.information(self, "Auto-Fill Gesamt", f"{total_filled} Zellen in der gesamten Tabelle gefüllt.")
 
-    # ==========================================================
-    # ADD COLUMN
-    # ==========================================================
+    # ---------------- Add column ----------------
     def add_column_t1_global(self):
         if not self.engine or not self.t1:
             QMessageBox.warning(self, "Fehlt", "Bitte zuerst Tabelle 1 laden und Start ausführen.")

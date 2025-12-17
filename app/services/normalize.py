@@ -1,5 +1,4 @@
 from __future__ import annotations
-import pandas as pd
 import re
 
 MISSING_TOKENS = {"", "nan", "none", "-", "n/a", "null"}
@@ -20,7 +19,3 @@ def norm_key(v: str | None, keep_leading_zeros: bool = True) -> str:
 def is_missing(v: str | None) -> bool:
     s = norm_text(v).lower()
     return s in MISSING_TOKENS
-
-def missing_mask(df: pd.DataFrame) -> pd.DataFrame:
-    # True = fehlt
-    return df.applymap(is_missing)

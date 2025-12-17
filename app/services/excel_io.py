@@ -14,13 +14,12 @@ def list_sheets(path: str) -> list[str]:
     return xls.sheet_names
 
 def load_table(path: str, sheet: str, header_row_1based: int) -> ExcelTable:
-    # header_row_1based: 1 = erste Zeile
     df = pd.read_excel(
         path,
         sheet_name=sheet,
         engine="openpyxl",
         header=header_row_1based - 1,
-        dtype=str,          # wichtig: Kundennummer etc. als TEXT
+        dtype=str,  # wichtig: Kundennummer etc. als TEXT
     )
     df.columns = [str(c).strip() for c in df.columns]
     return ExcelTable(Path(path), sheet, df)

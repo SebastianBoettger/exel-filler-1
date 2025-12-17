@@ -5,7 +5,7 @@ import sys
 def main():
     app = QApplication(sys.argv)
     w = MainWindow()
-    w.resize(1200, 600)
+    w.resize(1400, 900)
     w.show()
     sys.exit(app.exec())
 
