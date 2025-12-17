@@ -6,43 +6,21 @@ import pandas as pd
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QSpinBox,
     QMessageBox, QFileDialog, QAbstractItemView, QTableWidgetItem,
-    QDialog, QFormLayout, QListWidget, QListWidgetItem, QLineEdit, QToolButton,
-    QMenu, QInputDialog
+    QDialog, QFormLayout, QListWidget, QListWidgetItem, QLineEdit, QToolButton
 )
-from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt
 
 from app.services.excel_io import list_sheets, load_table
-from app.services.matcher import MatchEngine
+from app.services.matcher import MatchEngine  # still used for queue (missing fields)
 from app.services.normalize import is_missing
 from app.services.settings import AppSettings, load_settings, save_settings
 from app.services.multi_matcher import MultiMatcher, MatchProfile
-
 from app.services.apply_changes import save_filled, save_to_path, save_in_place
 from app.services.transforms import split_street_house, normalize_phone, state_from_zip_de
 
 from app.ui.dnd_tables import TargetTable
 from app.ui.source_panel import SourcePanel, SourceState
 
-from PySide6.QtGui import QColor, QBrush
-
-def pick_text_color(hex_color: str) -> QColor:
-    c = QColor(hex_color)
-    y = 0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()
-    return QColor("#000000") if y > 140 else QColor("#FFFFFF")
-
-PALETTE_50 = [
-    "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
-    "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#fabebe",
-    "#008080", "#e6beff", "#9a6324", "#fffac8", "#800000",
-    "#aaffc3", "#808000", "#ffd8b1", "#000075", "#808080",
-    "#ffffff", "#000000", "#ff7f00", "#1f77b4", "#2ca02c",
-    "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-    "#bcbd22", "#17becf", "#4daf4a", "#984ea3", "#ff33cc",
-    "#a65628", "#f781bf", "#999999", "#66c2a5", "#fc8d62",
-    "#8da0cb", "#e78ac3", "#a6d854", "#ffd92f", "#e5c494",
-    "#b3b3b3", "#006400", "#8b0000", "#00008b", "#ff1493",
-]
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -53,7 +31,7 @@ class MainWindow(QMainWindow):
 
         self.t1 = None
         self.t1_df: Optional[pd.DataFrame] = None
-        self.engine: Optional[MatchEngine] = None
+        self.engine: Optional[MatchEngine] = None  # used for queue scanning
         self.multi: Optional[MultiMatcher] = None
 
         self.keys_queue: List[str] = []
@@ -81,9 +59,6 @@ class MainWindow(QMainWindow):
         self.sp_t1_header.setValue(1)
         self.cb_t1_key = QComboBox()
 
-        # ✅ Match (T1)
-        self.cb_t1_match = QComboBox()
-
         top.addWidget(self.btn_t1)
         top.addWidget(self.lbl_t1, 2)
         top.addWidget(QLabel("Sheet"))
@@ -92,11 +67,6 @@ class MainWindow(QMainWindow):
         top.addWidget(self.sp_t1_header)
         top.addWidget(QLabel("KEY (Queue)"))
         top.addWidget(self.cb_t1_key, 1)
-
-        # ✅ Match (T1) an exakt dieser Stelle
-        top.addWidget(QLabel("Match (T1)"))
-        top.addWidget(self.cb_t1_match, 1)
-
         layout.addLayout(top)
 
         # --- action row ---
@@ -139,15 +109,9 @@ class MainWindow(QMainWindow):
         self.t1_view_top = TargetTable(1, 0)
         self.t1_view_bottom = TargetTable(1, 0)
         for v in (self.t1_view_top, self.t1_view_bottom):
-            h = v.horizontalHeader()
-            h.setContextMenuPolicy(Qt.CustomContextMenu)
-            h.customContextMenuRequested.connect(lambda pos, view=v: self._header_color_menu_t1(view, pos))
-        for v in (self.t1_view_top, self.t1_view_bottom):
             v.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
             v.setDragDropMode(QAbstractItemView.DropOnly)
             v.itemChanged.connect(self.on_t1_item_changed_any)
-            v.setContextMenuPolicy(Qt.CustomContextMenu)
-            v.customContextMenuRequested.connect(lambda pos, view=v: self._t1_cell_menu(view, pos))
         layout.addWidget(self.t1_view_top, 3)
         layout.addWidget(self.t1_view_bottom, 2)
         self.t1_view_bottom.hide()
@@ -156,20 +120,17 @@ class MainWindow(QMainWindow):
         self.status = QLabel("—")
         layout.addWidget(self.status)
 
-        # --- 3 sources (stacked docks) ---
+        # --- 3 source panels (stacked default) ---
         self.sources: Dict[str, SourcePanel] = {}
         self.src_states = [
             SourceState("src2", "Quelle 2"),
             SourceState("src3", "Quelle 3"),
             SourceState("src4", "Quelle 4"),
         ]
-        self._create_sources_docks()
 
-        for sid, panel in self.sources.items():
-            for v in (panel.view_top, panel.view_bottom):
-                h = v.horizontalHeader()
-                h.setContextMenuPolicy(Qt.CustomContextMenu)
-                h.customContextMenuRequested.connect(lambda pos, s=sid, view=v: self._header_color_menu_src(s, view, pos))
+        # Place sources under each other in one dock area:
+        # For ergonomics: default bottom area, split vertically.
+        self._create_sources_docks()
 
         # --- events ---
         self.btn_t1.clicked.connect(self.pick_t1)
@@ -186,13 +147,10 @@ class MainWindow(QMainWindow):
         self.btn_back_t1.clicked.connect(self.restore_t1_focus)
         self.ed_search_t1.returnPressed.connect(self.search_t1_next)
 
-        # AutoFill erstmal deaktiviert (bis du es wieder integrierst)
-        self.btn_fill_row.setEnabled(False)
-        self.btn_fill_all.setEnabled(False)
+        self.btn_fill_row.clicked.connect(self.autofill_current_row)
+        self.btn_fill_all.clicked.connect(self.autofill_all)
 
-        # ✅ Match (T1) Änderung
-        self.cb_t1_match.currentTextChanged.connect(self._on_match_changed)
-
+    # ---------- docks ----------
     def _create_sources_docks(self):
         from PySide6.QtWidgets import QDockWidget
 
@@ -216,12 +174,17 @@ class MainWindow(QMainWindow):
             self._source_docks.append(dock)
             self.sources[st.src_id] = panel
 
-        # optional: gleichmäßige Höhen
+        # optional: gleichmäßige Höhen (best effort)
         try:
-            self.resizeDocks(self._source_docks, [260, 260, 260], Qt.Vertical)
+            self.resizeDocks(self._source_docks, [250, 250, 250], Qt.Vertical)
         except Exception:
             pass
 
+    # ---------- settings persistence ----------
+    def _save_settings(self):
+        save_settings(self.settings)
+
+    # ---------- T1 load ----------
     def pick_t1(self):
         path, _ = QFileDialog.getOpenFileName(self, "Zieltabelle (T1) wählen", "", "Excel (*.xlsx *.xls)")
         if not path:
@@ -229,8 +192,6 @@ class MainWindow(QMainWindow):
         self.lbl_t1.setText(path)
         self.cb_t1_sheet.clear()
         self.cb_t1_sheet.addItems(list_sheets(path))
-
-        # einfache Verbindung (einmal reicht)
         self.cb_t1_sheet.currentTextChanged.connect(lambda: self._reload_t1(path))
         self._reload_t1(path)
 
@@ -241,71 +202,51 @@ class MainWindow(QMainWindow):
         header = int(self.sp_t1_header.value())
         self.t1 = load_table(path, sheet, header)
         self.t1_df = self.t1.df
-
-        # KEY (Queue)
         self.cb_t1_key.clear()
         self.cb_t1_key.addItems(self.t1_df.columns.tolist())
 
-        # ✅ Match (T1)
-        self.cb_t1_match.blockSignals(True)
-        self.cb_t1_match.clear()
-        self.cb_t1_match.addItems([""] + self.t1_df.columns.tolist())
-        if self.settings.t1_match_fields:
-            self.cb_t1_match.setCurrentText(self.settings.t1_match_fields[0])
-        self.cb_t1_match.blockSignals(False)
-
+    # ---------- build matcher ----------
     def _rebuild_multi_matcher(self):
         if self.t1_df is None:
-            self.multi = None
-            return
-
-        # T1 Match-Feld muss gesetzt sein
-        if not self.settings.t1_match_fields:
-            self.multi = None
             return
 
         sources_df: Dict[str, pd.DataFrame] = {}
         for sid, panel in self.sources.items():
-            sources_df[sid] = panel.state.table.df if panel.state.table is not None else pd.DataFrame()
+            if panel.state.table is not None:
+                sources_df[sid] = panel.state.table.df
+            else:
+                sources_df[sid] = pd.DataFrame()
 
         prof = MatchProfile(
             t1_fields=self.settings.t1_match_fields,
             src_fields=self.settings.src_match_fields,
         )
+
+        if not prof.t1_fields or any(not prof.src_fields.get(sid) for sid in sources_df.keys()):
+            # profile incomplete -> matcher disabled
+            self.multi = None
+            return
+
         self.multi = MultiMatcher(self.t1_df, sources_df, prof)
 
-    def _on_match_changed(self):
-        # T1 Match-Feld übernehmen
-        t1m = self.cb_t1_match.currentText().strip()
-        self.settings.t1_match_fields = [t1m] if t1m else []
-
-        # pro Quelle: falls SourcePanel cb_match hat, könntest du hier auslesen
-        # (optional – wenn du das schon eingebaut hast)
-        for sid, panel in self.sources.items():
-            if hasattr(panel, "cb_match"):
-                sm = panel.cb_match.currentText().strip()
-                self.settings.src_match_fields[sid] = [sm] if sm else self.settings.src_match_fields.get(sid, [])
-
-        save_settings(self.settings)
-        self._rebuild_multi_matcher()
-
-        if self.current_t1_index is not None:
-            self._render_sources_for_t1(self.current_t1_index)
-
+    # ---------- queue scan ----------
     def start_scan(self):
         if self.t1_df is None:
             QMessageBox.warning(self, "Fehlt", "Bitte zuerst Tabelle 1 laden.")
             return
 
+        # build queue using key column (simple)
         key1 = self.cb_t1_key.currentText()
         if not key1:
             QMessageBox.warning(self, "Fehlt", "Bitte KEY-Spalte für Queue wählen.")
             return
 
+        # For sources, we still allow independent file load inside SourcePanels
+        # Rebuild matcher
         self._rebuild_multi_matcher()
 
-        # Queue via MatchEngine-Logik
-        self.engine = MatchEngine(self.t1_df, key1, pd.DataFrame({key1: []}), key1)  # dummy
+        # queue: missing any non-key columns
+        self.engine = MatchEngine(self.t1_df, key1, pd.DataFrame({key1: []}), key1)  # dummy df2
         cols = [c for c in self.engine.df1.columns if c not in [key1, "_KEY_"]]
         self.keys_queue = self.engine.keys_with_missing(cols)
         self.current_pos = -1
@@ -313,6 +254,7 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Queue: {len(self.keys_queue)} Datensätze mit Lücken")
         self.next_row()
 
+    # ---------- navigation ----------
     def next_row(self):
         if not self.keys_queue:
             QMessageBox.information(self, "Fertig", "Keine fehlenden Datensätze gefunden.")
@@ -330,7 +272,9 @@ class MainWindow(QMainWindow):
             key = self.keys_queue[self.current_pos]
             self._show_by_key(key)
 
+    # ---------- show ----------
     def _show_by_key(self, key_norm: str):
+        # key_norm comes from MatchEngine _KEY_ (based on key column). Find T1 row index:
         hit = self.engine.df1.index[self.engine.df1["_KEY_"] == key_norm]
         if len(hit) == 0:
             return
@@ -371,8 +315,9 @@ class MainWindow(QMainWindow):
         self._t1_last_focus = (self.t1_view_top, 0, 0)
 
     def _render_sources_for_t1(self, t1_idx: int):
+        # If matcher not ready: show empty
         if self.multi is None:
-            for _, panel in self.sources.items():
+            for sid, panel in self.sources.items():
                 panel.render_rows(pd.DataFrame())
                 self._apply_header_colors()
             return
@@ -389,6 +334,7 @@ class MainWindow(QMainWindow):
             panel.render_rows(sub.reset_index(drop=True))
             self._apply_header_colors()
 
+    # ---------- T1 edit/drop sync ----------
     def on_t1_item_changed_any(self, item: QTableWidgetItem):
         if self.t1_df is None or self.current_t1_index is None:
             return
@@ -402,6 +348,7 @@ class MainWindow(QMainWindow):
         self.t1_df.at[self.current_t1_index, col_name] = item.text()
 
     def on_t1_cell_dropped(self, view, row: int, col: int, text: str):
+        # called by TargetTable (dnd_tables.py)
         if self.t1_df is None or self.current_t1_index is None:
             return
         if view == self.t1_view_top:
@@ -410,6 +357,7 @@ class MainWindow(QMainWindow):
             col_name = self._t1_cols_bottom[col]
         self.t1_df.at[self.current_t1_index, col_name] = text
 
+    # ---------- search T1 ----------
     def restore_t1_focus(self):
         if hasattr(self, "_t1_last_focus") and self._t1_last_focus:
             v, r, c = self._t1_last_focus
@@ -422,6 +370,7 @@ class MainWindow(QMainWindow):
             return
         views = [self.t1_view_top] + ([self.t1_view_bottom] if self.t1_view_bottom.isVisible() else [])
 
+        # start from current
         start = (0, 0, -1)
         for vi, v in enumerate(views):
             if v.currentRow() >= 0 and v.currentColumn() >= 0 and v.hasFocus():
@@ -441,111 +390,7 @@ class MainWindow(QMainWindow):
                         self._t1_last_focus = (v, r, c)
                         return
 
-    def _suggest_search_strings(self) -> List[str]:
-        if self.t1_df is None or self.current_t1_index is None:
-            return []
-        r = self.t1_df.loc[self.current_t1_index]
-
-        priority = [
-            "customerNumber", "Kd-Nr.", "uniqueName",
-            "name", "Praxisname",
-            "emailGeneral", "email",
-            "phoneGeneral", "mobilGeneral", "phone",
-            "zipCode", "PLZ", "postalCode",
-            "city", "Ort",
-            "street", "Straße"
-        ]
-        out = []
-        for k in priority:
-            if k in r.index:
-                v = r.get(k)
-                if v is not None:
-                    s = str(v).strip()
-                    if s and s.lower() != "nan":
-                        out.append(s)
-        uniq = []
-        for x in out:
-            if x not in uniq:
-                uniq.append(x)
-        return uniq
-
-    def _set_search_all_sources(self, text: str):
-        for _, panel in self.sources.items():
-            panel.ed_search.setText(text)
-
-    def _search_in_source(self, src_id: str, text: str):
-        panel = self.sources.get(src_id)
-        if not panel:
-            return
-        panel.ed_search.setText(text)
-        if hasattr(panel, "filter_full_table_exact"):
-            panel.filter_full_table_exact()
-
-    def _set_match_for_source(self, src_id: str, t1_col: str):
-        self.settings.t1_match_fields = [t1_col]
-
-        panel = self.sources.get(src_id)
-        if not panel or panel.state.table is None:
-            QMessageBox.warning(self, "Fehlt", f"{src_id} ist nicht geladen.")
-            return
-
-        src_cols = [c for c in panel.state.table.df.columns if c != "_KEY_"]
-        if not src_cols:
-            QMessageBox.warning(self, "Fehlt", "Quelle hat keine Spalten.")
-            return
-
-        col, ok = QInputDialog.getItem(self, "Quelle-Spalte wählen", f"{src_id}: Match-Spalte wählen", src_cols, 0, False)
-        if not ok or not col:
-            return
-
-        self.settings.src_match_fields[src_id] = [col]
-        save_settings(self.settings)
-        self._rebuild_multi_matcher()
-
-        if self.current_t1_index is not None:
-            self._render_sources_for_t1(self.current_t1_index)
-
-    def _t1_cell_menu(self, view, pos):
-        if self.t1_df is None or self.current_t1_index is None:
-            return
-        item = view.itemAt(pos)
-        if not item:
-            return
-
-        col_idx = item.column()
-        col_name = (self._t1_cols_top[col_idx] if view == self.t1_view_top else self._t1_cols_bottom[col_idx])
-        value = item.text()
-
-        menu = QMenu(self)
-
-        suggestions = self._suggest_search_strings()
-        if value and value not in suggestions:
-            suggestions.insert(0, value)
-
-        sub_sug = menu.addMenu("Suchvorschlag übernehmen…")
-        for s in suggestions[:8]:
-            a = QAction(s, self)
-            a.triggered.connect(lambda _, vv=s: self._set_search_all_sources(vv))
-            sub_sug.addAction(a)
-
-        menu.addSeparator()
-
-        sub_search = menu.addMenu("In Quelle suchen…")
-        for sid, title in [("src2","Quelle 2"),("src3","Quelle 3"),("src4","Quelle 4")]:
-            a = QAction(f"{title}: Suche = Zellwert", self)
-            a.triggered.connect(lambda _, ss=sid, vv=value: self._search_in_source(ss, vv))
-            sub_search.addAction(a)
-
-        menu.addSeparator()
-
-        sub_key = menu.addMenu("Match-Key setzen…")
-        for sid, title in [("src2","Quelle 2"),("src3","Quelle 3"),("src4","Quelle 4")]:
-            a = QAction(f"{title}: T1[{col_name}] -> Quelle-Spalte wählen…", self)
-            a.triggered.connect(lambda _, ss=sid, c=col_name: self._set_match_for_source(ss, c))
-            sub_key.addAction(a)
-
-        menu.exec(view.viewport().mapToGlobal(pos))
-
+    # ---------- match fields UI ----------
     def open_match_fields_dialog(self):
         if self.t1_df is None:
             QMessageBox.warning(self, "Fehlt", "Bitte zuerst Tabelle 1 laden.")
@@ -558,6 +403,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         root.addLayout(form)
 
+        # T1 fields multi-select
         t1_list = QListWidget()
         t1_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         for c in self.t1_df.columns:
@@ -567,6 +413,7 @@ class MainWindow(QMainWindow):
                 it.setSelected(True)
         form.addRow(QLabel("T1 Match-Felder"), t1_list)
 
+        # per source
         src_lists: Dict[str, QListWidget] = {}
         for st in self.src_states:
             panel = self.sources[st.src_id]
@@ -592,8 +439,9 @@ class MainWindow(QMainWindow):
             self.settings.t1_match_fields = [i.text() for i in t1_list.selectedItems()]
             for sid, lst in src_lists.items():
                 self.settings.src_match_fields[sid] = [i.text() for i in lst.selectedItems()]
-            save_settings(self.settings)
+            self._save_settings()
             self._rebuild_multi_matcher()
+            # refresh current view
             if self.current_t1_index is not None:
                 self._render_sources_for_t1(self.current_t1_index)
             dlg.accept()
@@ -602,6 +450,7 @@ class MainWindow(QMainWindow):
         cancel.clicked.connect(dlg.reject)
         dlg.exec()
 
+    # ---------- save ----------
     def save_new_file(self):
         if self.t1 is None or self.t1_df is None:
             return
@@ -614,7 +463,7 @@ class MainWindow(QMainWindow):
         default = "output.xlsx"
         if self.t1:
             default = str(self.t1.path.with_name(self.t1.path.stem + "_filled.xlsx"))
-        path, _ = QFileDialog.getSaveFileName(self, "Speichern unter…", default, "Excel (*.xlsx)")
+        path, _ = QFileDialog.getSaveFileName(self, "Speichern unter…", default, "Excel (*.xlsx *.xls)")
         if not path:
             return
         out = save_to_path(self.t1_df, path)
@@ -631,108 +480,143 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen:\n{e}")
 
-    def pick_text_color(hex_color: str) -> QColor:
-        c = QColor(hex_color)
-        y = 0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()
-        return QColor("#000000") if y > 140 else QColor("#FFFFFF")
-
-    def _header_color_menu_t1(self, view, pos):
-        header = view.horizontalHeader()
-        col = header.logicalIndexAt(pos)
-        if col < 0:
+    # ---------- fills (placeholder: reuse your current coupling/cuts logic if needed) ----------
+    #def autofill_current_row(self): def autofill_current_key_linked(self):
+     # ---------------- Plausible fill row ----------------
+    def autofill_current_row(self):
+        if not self.engine or self.current_key is None:
             return
-        it = view.horizontalHeaderItem(col)
-        if not it:
+
+        t1_idx = self.engine.t1_row_index_for_key(self.current_key)
+        if t1_idx is None:
             return
-        col_name = it.text()
 
-        menu = QMenu(self)
-        sub = menu.addMenu(f"Farbe (T1): {col_name}")
-
-        for hc in PALETTE_50:
-            a = sub.addAction(hc)
-            a.triggered.connect(lambda _, c=hc: self._set_color_t1(col_name, c))
-
-        clr = menu.addAction("Farbe löschen")
-        clr.triggered.connect(lambda: self._set_color_t1(col_name, ""))
-
-        menu.exec(header.mapToGlobal(pos))
-
-
-    def _set_color_t1(self, col_name: str, hex_color: str):
-        if hex_color:
-            self.settings.t1_colors[col_name] = hex_color
-        else:
-            self.settings.t1_colors.pop(col_name, None)
-        save_settings(self.settings)
-        self._apply_header_colors()
-
-
-    def _header_color_menu_src(self, src_id: str, view, pos):
-        header = view.horizontalHeader()
-        col = header.logicalIndexAt(pos)
-        if col < 0:
+        t2_df = self.engine.t2_rows_for_key(self.current_key)
+        if t2_df is None or len(t2_df) == 0:
+            QMessageBox.information(self, "Auto-Fill", "Keine passende Kundennummer in Tabelle 2 gefunden.")
             return
-        it = view.horizontalHeaderItem(col)
-        if not it:
+
+        display_cols = [c for c in self.engine.df1.columns if c != "_KEY_"]
+        key_col = self.cb_t1_key.currentText()
+
+        filled = 0
+
+        for t1_col in display_cols:
+            if t1_col == key_col:
+                continue
+            if not is_missing(self.engine.df1.at[t1_idx, t1_col]):
+                continue
+
+            t2_col = self.col_links.get(t1_col)
+            if not t2_col or t2_col not in t2_df.columns:
+                continue
+
+            chosen = None
+            for _, r in t2_df.iterrows():
+                v = r.get(t2_col)
+                if not is_missing(v):
+                    chosen = str(v).strip()
+                    if chosen:
+                        break
+            if not chosen:
+                continue
+
+            if self.cuts.get("split_street_house", True) and t1_col.lower() in ("street", "straße"):
+                street, house = split_street_house(chosen)
+                chosen = street
+                for cand in ("houseNumber", "hausnummer"):
+                    if cand in self.engine.df1.columns and is_missing(self.engine.df1.at[t1_idx, cand]) and house:
+                        self.engine.df1.at[t1_idx, cand] = house
+
+            if self.cuts.get("normalize_phone", True) and t1_col.lower() in ("phone", "phonegeneral", "telefon", "festnetz", "mobil", "mobilgeneral"):
+                chosen = normalize_phone(chosen)
+
+            self.engine.df1.at[t1_idx, t1_col] = chosen
+            filled += 1
+
+        if self.cuts.get("fill_country_default", False) and "country" in self.engine.df1.columns and is_missing(self.engine.df1.at[t1_idx, "country"]):
+            self.engine.df1.at[t1_idx, "country"] = self.country_default_value
+
+        if self.cuts.get("infer_state_from_zip", False) and "state" in self.engine.df1.columns and is_missing(self.engine.df1.at[t1_idx, "state"]):
+            z = None
+            for cand in ("zipCode", "plz", "postalCode"):
+                if cand in self.engine.df1.columns:
+                    z = self.engine.df1.at[t1_idx, cand]
+                    break
+            st = state_from_zip_de(z) if z else None
+            if st:
+                self.engine.df1.at[t1_idx, "state"] = st
+
+        self.show_key(self.current_key)
+        QMessageBox.information(self, "Auto-Fill", f"{filled} Felder (Zeile) plausibel gefüllt.")
+
+    # def autofill_all(self): def autofill_all_linked(self):
+    # ---------------- Plausible fill all ----------------
+    def autofill_all(self):
+        if not self.engine:
+            QMessageBox.warning(self, "Fehlt", "Bitte erst Start ausführen.")
             return
-        col_name = it.text()
+        if not self.col_links:
+            QMessageBox.warning(self, "Fehlt", "Bitte erst Kopplungen definieren.")
+            return
 
-        menu = QMenu(self)
-        sub = menu.addMenu(f"Farbe ({src_id}): {col_name}")
+        key_col = self.cb_t1_key.currentText()
+        total_filled = 0
 
-        for hc in PALETTE_50:
-            a = sub.addAction(hc)
-            a.triggered.connect(lambda _, c=hc: self._set_color_src(src_id, col_name, c))
+        for idx, row in self.engine.df1.iterrows():
+            key = row.get("_KEY_")
+            if not key:
+                continue
 
-        clr = menu.addAction("Farbe löschen")
-        clr.triggered.connect(lambda: self._set_color_src(src_id, col_name, ""))
+            t2_df = self.engine.t2_rows_for_key(key)
+            if t2_df is None or len(t2_df) == 0:
+                continue
 
-        menu.exec(header.mapToGlobal(pos))
-
-
-    def _set_color_src(self, src_id: str, col_name: str, hex_color: str):
-        if src_id not in self.settings.src_colors:
-            self.settings.src_colors[src_id] = {}
-        if hex_color:
-            self.settings.src_colors[src_id][col_name] = hex_color
-        else:
-            self.settings.src_colors[src_id].pop(col_name, None)
-        save_settings(self.settings)
-        self._apply_header_colors()
-
-
-    def _apply_header_colors(self):
-        # T1 (top/bottom)
-        for v in (self.t1_view_top, self.t1_view_bottom):
-            for i in range(v.columnCount()):
-                it = v.horizontalHeaderItem(i)
-                if not it:
+            for t1_col, t2_col in self.col_links.items():
+                if t1_col in ("_KEY_", key_col):
                     continue
-                name = it.text()
-                hc = self.settings.t1_colors.get(name)
-                if hc:
-                    it.setBackground(QBrush(QColor(hc)))
-                    it.setForeground(QBrush(pick_text_color(hc)))
-                else:
-                    it.setBackground(QBrush())
-                    it.setForeground(QBrush())
+                if t1_col not in self.engine.df1.columns or t2_col not in t2_df.columns:
+                    continue
+                if not is_missing(self.engine.df1.at[idx, t1_col]):
+                    continue
 
-        # Quellen (jede Quelle top/bottom)
-        for sid, panel in self.sources.items():
-            cmap = self.settings.src_colors.get(sid, {})
-            for v in (panel.view_top, panel.view_bottom):
-                for i in range(v.columnCount()):
-                    it = v.horizontalHeaderItem(i)
-                    if not it:
-                        continue
-                    name = it.text()
-                    hc = cmap.get(name)
-                    if hc:
-                        it.setBackground(QBrush(QColor(hc)))
-                        it.setForeground(QBrush(pick_text_color(hc)))
-                    else:
-                        it.setBackground(QBrush())
-                        it.setForeground(QBrush())
+                chosen = None
+                for _, r2 in t2_df.iterrows():
+                    v = r2.get(t2_col)
+                    if not is_missing(v):
+                        chosen = str(v).strip()
+                        if chosen:
+                            break
+                if not chosen:
+                    continue
 
-    
+                if self.cuts.get("normalize_phone", True) and t1_col.lower() in ("phone", "phonegeneral", "telefon", "festnetz", "mobil", "mobilgeneral"):
+                    chosen = normalize_phone(chosen)
+
+                self.engine.df1.at[idx, t1_col] = chosen
+                total_filled += 1
+
+                if self.cuts.get("split_street_house", True) and t1_col.lower() in ("street", "straße"):
+                    street, house = split_street_house(chosen)
+                    self.engine.df1.at[idx, t1_col] = street
+                    for cand in ("houseNumber", "hausnummer"):
+                        if cand in self.engine.df1.columns and is_missing(self.engine.df1.at[idx, cand]) and house:
+                            self.engine.df1.at[idx, cand] = house
+
+            if self.cuts.get("fill_country_default", False) and "country" in self.engine.df1.columns and is_missing(self.engine.df1.at[idx, "country"]):
+                self.engine.df1.at[idx, "country"] = self.country_default_value
+
+            if self.cuts.get("infer_state_from_zip", False) and "state" in self.engine.df1.columns and is_missing(self.engine.df1.at[idx, "state"]):
+                z = None
+                for cand in ("zipCode", "plz", "postalCode"):
+                    if cand in self.engine.df1.columns:
+                        z = self.engine.df1.at[idx, cand]
+                        break
+                st = state_from_zip_de(z) if z else None
+                if st:
+                    self.engine.df1.at[idx, "state"] = st
+
+        if self.current_key is not None:
+            self.show_key(self.current_key)
+
+        QMessageBox.information(self, "Auto-Fill Gesamt", f"{total_filled} Zellen in der gesamten Tabelle gefüllt.")
